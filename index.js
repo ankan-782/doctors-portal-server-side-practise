@@ -1,13 +1,17 @@
 const express = require('express');
 const app = express();
+const { MongoClient } = require('mongodb');
 const cors = require('cors');
 const admin = require("firebase-admin");
+const ObjectId = require('mongodb').ObjectId;
 require('dotenv').config();
-const { MongoClient } = require('mongodb');
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
+const fileUpload = require('express-fileupload');
+
+
 const port = process.env.PORT || 5000;
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
 });
@@ -15,6 +19,7 @@ admin.initializeApp({
 //middleware
 app.use(cors());
 app.use(express.json());
+app.use(fileUpload());
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.wipcb.mongodb.net/myFirstDatabase?retryWrites=true&w=majority`;
 const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology: true });
@@ -41,6 +46,31 @@ async function run() {
         const database = client.db('doctors_portal');
         const appointmentsCollection = database.collection('appointments');
         const usersCollection = database.collection('users');
+        const doctorsCollection = database.collection('doctors');
+
+        // storing the doctors info
+        app.post('/doctors', async (req, res) => {
+            const name = req.body.name;
+            const email = req.body.email;
+            const pic = req.files.image;
+            const picData = pic.data;
+            const encodedPic = picData.toString('base64');
+            const imgBuffer = Buffer.from(encodedPic, 'base64');
+            const doctor = {
+                name: name,
+                email: email,
+                image: imgBuffer
+            }
+            const result = await doctorsCollection.insertOne(doctor)
+            res.json(result);
+        })
+
+        // showing the doctors info to the client side
+        app.get('/doctors', async (req, res) => {
+            const cursor = doctorsCollection.find({});
+            const doctors = await cursor.toArray();
+            res.json(doctors);
+        })
 
         // storing the appointments
         app.post('/appointments', async (req, res) => {
@@ -49,6 +79,7 @@ async function run() {
             res.json(result);
         });
 
+        // showing the appointments to the client side by email and date filtering
         app.get('/appointments', verifyToken, async (req, res) => {
             const email = req.query.email;
             const date = req.query.date;
@@ -57,6 +88,28 @@ async function run() {
             const appointments = await cursor.toArray();
             res.json(appointments);
         });
+
+        // showing the particular appointments info to the client side
+        app.get('/appointments/:id', async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: ObjectId(id) };
+            const result = await appointmentsCollection.findOne(query);
+            res.json(result);
+        })
+
+        // payment info adding in the appointments
+        app.put('/appointments/:id', async (req, res) => {
+            const id = req.params.id;
+            const payment = req.body;
+            const filter = {_id: ObjectId(id)};
+            const updateDoc = {
+                $set: {
+                    payment: payment
+                }
+            };
+            const result = await appointmentsCollection.updateOne(filter, updateDoc);
+            res.json(result);
+        })
 
         //storing the users [brand new users]
         app.post('/users', async (req, res) => {
@@ -109,6 +162,21 @@ async function run() {
             // const result = await usersCollection.updateOne(filter, updateDoc);
             // res.json(result);
         });
+
+        // payment intent creation in stripe
+        app.post('/create-payment-intent', async (req, res) => {
+            const paymentInfo = req.body;
+            const amount = paymentInfo.price * 100;
+            const paymentIntent = await stripe.paymentIntents.create({
+                currency: 'usd',
+                amount: amount,
+                payment_method_types: [
+                    "card",
+                ],
+            });
+            // console.log(paymentIntent);
+            res.json({ clientSecret: paymentIntent.client_secret })
+        })
     } finally {
         // await client.close();
     }
